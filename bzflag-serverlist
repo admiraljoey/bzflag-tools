@@ -1,0 +1,265 @@
+#!/bin/sh
+#
+# Admiral "Rodent Snuffer" Joey, 
+# 22NOV16
+# DDI/nc/os+pd
+# %%%C%W%%
+#
+# use appropriately.
+
+PGM=`/usr/bin/basename "$0"`
+
+bznet_serverlist_fetch()
+{
+	bznet_serverlist_URL='http://my.bzflag.org/db?action=LIST&listformat=plain&local=1' 
+
+	/usr/bin/wget \
+		--tries=1 \
+		--timeout=15 \
+		--waitretry=10 \
+		--output-document="-" \
+		--user-agent="Mozilla/rodent.snuffer.bzf.tools" \
+		--quiet \
+		"$bznet_serverlist_URL" 
+
+	status="$?"
+
+	case "$status" in
+		0)	;;
+		*)	echo "${PGM}: wget returned $status, exiting..." 1>&2
+			exit 1
+			;;
+	esac
+}
+
+case "$PGM" in
+	*-print )	OVERRIDE_ARGS="--stdin" ;;
+	* )			OVERRIDE_ARGS="" ;;
+esac
+
+#for f in --no-debug --fetch --all --observers $OVERRIDE_ARGS $*
+
+for f in --no-debug --fetch --count --no-observers $OVERRIDE_ARGS $*
+do
+	case "$f" in
+		-a  |      --all )			DO_MIN_USER_COUNT=0 ;;
+		-1  | -c | --count ) 		DO_MIN_USER_COUNT=1 ;;
+		-2  | -m | --more ) 		DO_MIN_USER_COUNT=2 ;;
+		-6  | -M | --many ) 		DO_MIN_USER_COUNT=6 ;;
+		-10 | -l | --lots ) 		DO_MIN_USER_COUNT=10 ;;	# todo: use getargs, later...
+	
+		-o | --observers )			DO_COUNT_OBSERVERS=YES ;;
+		-n | --no-observers )		DO_COUNT_OBSERVERS=NO ;;
+
+		-d | --debug )				DO_DEBUG=YES ;;
+		     --no-debug )			DO_DEBUG=NO ;;
+
+		-  | --stdin )				DO_STDIN=YES ;;
+		-f | --fetch )				DO_STDIN=NO ;;
+
+		-r | --reverse-sort )		SORT_ARGS="$SORT_ARGS -r" ;;
+
+	esac
+done
+
+case "$DO_STDIN" in
+	YES )	/bin/cat -u ;;
+	* )		bznet_serverlist_fetch ;;
+esac \
+| /usr/bin/gawk \
+	--non-decimal-data \
+	-v PGM="$PGM" \
+	-v DO_MIN_USER_COUNT="$DO_MIN_USER_COUNT" \
+	-v DO_COUNT_OBSERVERS="$DO_COUNT_OBSERVERS" \
+	-v DO_DEBUG="$DO_DEBUG" \
+'
+
+# GLOBAL_SCOPE, bznet_hexdata_start[]
+# GLOBAL_SCOPE, bznet_hexdata_size[]
+
+function bznet_hexdata_unpack_init( \
+	NOARGS, \
+	LOCAL_SCOPE, hexdata_items, n_hexdata_items, hexdata_item, hexdata_item_part, pos, var_name, var_size \
+)
+{
+	hexdata_items = " \
+		gameType:4 \
+		gameOptions:4 \
+		maxShots:4 \
+		shakeWins:4 \
+		shakeTimeout:4 \
+		maxPlayerScore:4 \
+		maxTeamScore:4 \
+		maxTime:4 \
+		maxPlayers:2 \
+		rogueCount:2 \
+		rogueMax:2 \
+		redCount:2 \
+		redMax:2 \
+		greenCount:2 \
+		greenMax:2 \
+		blueCount:2 \
+		blueMax:2 \
+		purpleCount:2 \
+		purpleMax:2 \
+		observerCount:2 \
+		observerMax:2  \
+	"
+
+	pos = 1
+
+	n_hexdata_items = split( hexdata_items, hexdata_item, " " )
+
+	for( j = 1; j <= n_hexdata_items; ++j )
+	{
+		if( split( hexdata_item[ j ], hexdata_item_part, ":" ) == 2 )
+		{
+			var_name = hexdata_item_part[ 1 ]
+			var_size = hexdata_item_part[ 2 ]
+
+			bznet_hexdata_start[ var_name ] = pos
+			bznet_hexdata_size[  var_name ] = var_size
+
+			if( DO_DEBUG == "YES" )
+			{
+				print \
+					PGM ": " \
+					"debug: " \
+					"array[ \"" var_name "\" ] " \
+					"= substr( hexdata, " pos ", " var_size " )" \
+					>> "/dev/stderr"
+			}
+
+			pos += var_size
+		}
+	}
+}
+
+function bznet_hexdata_unpack( \
+	str, array, \
+	LOCAL_SCOPE, i, len \
+)
+{
+	len = length( str ) 
+
+	for( i in bznet_hexdata_start )
+	{
+		if( ( bznet_hexdata_start[ i ] + bznet_hexdata_size[ i ] ) > ( len + 1 ) )
+		{
+			print \
+				PGM ": " \
+				"error:" \
+				" data short for index " i  \
+				", data len=" len \
+				", want start=" bznet_hexdata_start[ i ] \
+				", size="  bznet_hexdata_size[ i ] \
+				>> "/dev/stderr"
+			continue
+		}
+		array[ i ] = \
+			sprintf( "%d", \
+				"0x" substr( str, bznet_hexdata_start[ i ], bznet_hexdata_size[ i ] ) \
+			)
+	}
+}
+
+BEGIN {
+	bznet_hexdata_unpack_init( )
+}
+
+function getinput_fields( \
+	start, end, \
+	LOCAL_SCOPE, j, o \
+)
+{
+	o = ""
+	for( j = start; j <= end; ++j )
+	{
+		if( o ) 
+			o = o " "
+		o = o "" $j
+	}
+	return o
+}
+
+{
+	#
+	# plain text input record appears as:
+	#
+	# 01.bztank.net:5154 BZFS0221 0001003a0004000000000000000000003c00000019000000190000010a 46.101.85.243 The Two Tanks - Laser Sniping!
+
+	if( NF < 5 )
+	{
+		print \
+			PGM ": " \
+			"error: incorrect amount of data, record: " NR \
+			>> "/dev/stderr"
+		next
+	}
+
+	port		= 0
+	serverport	= server = $1
+	version		= $2
+	hexdata		= $3
+	ip			= $4
+	name		= getinput_fields( 5, NF )
+
+	if( split( serverport, tmp, ":" ) == 2 )
+	{
+		server = tmp[ 1 ]
+		port = tmp[ 2 ]
+	}
+
+	bznet_hexdata_unpack( hexdata, data_item )
+
+	nusers = \
+		data_item[ "rogueCount" ] + \
+		data_item[ "redCount" ] + \
+		data_item[ "greenCount" ] + \
+		data_item[ "blueCount" ] + \
+		data_item[ "purpleCount" ]
+
+	if( DO_COUNT_OBSERVERS == "YES" )
+		tot = nusers + data_item[ "observerCount" ]
+	else
+		tot = nusers
+
+	if( tot < int( DO_MIN_USER_COUNT ) )
+		next
+
+	printf( "%3d ",			nusers )
+	printf( "%3d ",			data_item[ "observerCount" ] )
+	printf( "%-40.40s ",	serverport )
+	printf( "%s",			name )
+	printf( "\n" )
+}
+' \
+| /usr/bin/sort -n ${SORT_ARGS}
+
+
+exit
+
+# from bzflag src/net/Ping.cxx:
+#
+#  buf = unpackHex16(buf, gameType);
+#  buf = unpackHex16(buf, gameOptions);
+#  buf = unpackHex16(buf, maxShots);
+#  buf = unpackHex16(buf, shakeWins);
+#  buf = unpackHex16(buf, shakeTimeout);
+#  buf = unpackHex16(buf, maxPlayerScore);
+#  buf = unpackHex16(buf, maxTeamScore);
+#  buf = unpackHex16(buf, maxTime);
+#  buf = unpackHex8(buf, maxPlayers);
+#  buf = unpackHex8(buf, rogueCount);
+#  buf = unpackHex8(buf, rogueMax);
+#  buf = unpackHex8(buf, redCount);
+#  buf = unpackHex8(buf, redMax);
+#  buf = unpackHex8(buf, greenCount);
+#  buf = unpackHex8(buf, greenMax);
+#  buf = unpackHex8(buf, blueCount);
+#  buf = unpackHex8(buf, blueMax);
+#  buf = unpackHex8(buf, purpleCount);
+#  buf = unpackHex8(buf, purpleMax);
+#  buf = unpackHex8(buf, observerCount);
+#  buf = unpackHex8(buf, observerMax);
+
